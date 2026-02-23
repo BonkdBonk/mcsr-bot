@@ -1,22 +1,14 @@
-"scripts": {
-  "start": "node index.js"
-}
-
 {
   "name": "mcsr-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "MCSR PB Discord Bot",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "axios": "^1.13.5",
-    "discord.js": "^14.25.1",
-    "dotenv": "^17.3.1"
+    "axios": "^1.6.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
   }
 }
