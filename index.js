@@ -228,12 +228,88 @@ function computeTop3(state, t) {
   return rows.slice(0, 3).map(([name]) => name);
 }
 
+// ---- NEW helpers for win/loss + opponent + elo ----
+function getOpponentNamesFromMatch(m, playerUuid) {
+  const arr = Array.isArray(m?.players) ? m.players : [];
+  const opps = arr
+    .filter((pl) => pl?.uuid && pl.uuid !== playerUuid)
+    .map((pl) => pl?.nickname)
+    .filter((name) => typeof name === "string" && name.length > 0)
+    // optional: hide the bot label if it appears
+    .filter((name) => name !== "[Ranked Bot]");
+
+  if (opps.length === 0) {
+    // fallback: if only bot exists, show it
+    const bot = arr
+      .map((pl) => pl?.nickname)
+      .find((n) => n === "[Ranked Bot]");
+    return bot ? "[Ranked Bot]" : "Unknown";
+  }
+
+  return opps.join(" & ");
+}
+
+function getEloForPlayerFromMatch(m, playerUuid) {
+  // Best effort: try changes[] first (often post-match)
+  if (Array.isArray(m?.changes)) {
+    const c = m.changes.find((x) => x?.uuid === playerUuid && typeof x?.eloRate === "number");
+    if (c && typeof c.eloRate === "number") return c.eloRate;
+  }
+
+  // Fallback: look at players[] object
+  if (Array.isArray(m?.players)) {
+    const pl = m.players.find((x) => x?.uuid === playerUuid);
+    if (pl && typeof pl.eloRate === "number") return pl.eloRate;
+  }
+
+  return null;
+}
+
+function buildRankedResultMessage({ trackedName, trackedUuid, match }) {
+  const t = match?.type;
+  const typeName = typeLabel(t);
+
+  const time = Number(match?.result?.time);
+  const forfeited = !!match?.forfeited;
+  const winnerUuid = match?.result?.uuid || null;
+
+  const oppName = getOpponentNamesFromMatch(match, trackedUuid);
+
+  const elo = getEloForPlayerFromMatch(match, trackedUuid);
+  const eloText = typeof elo === "number" ? ` • **ELO:** ${elo}` : "";
+
+  // If no time or forfeited: treat as DNF-ish.
+  if (forfeited || !Number.isFinite(time)) {
+    // If we can still infer winner/loser, reflect that; otherwise generic.
+    if (winnerUuid && winnerUuid === trackedUuid) {
+      return `✅ **${trackedName}** beat **${oppName}** — no completion time (forfeit/DNF). (${typeName})${eloText}`;
+    }
+    if (winnerUuid && winnerUuid !== trackedUuid) {
+      return `❌ **${trackedName}** lost to **${oppName}** — no completion time (forfeit/DNF). (${typeName})${eloText}`;
+    }
+    return `⚠️ **${trackedName}** finished a **${typeName}** match — no completion time (DNF/forfeit).${eloText}`;
+  }
+
+  // Normal case (time exists)
+  const timeText = formatTime(time);
+
+  // Winner check
+  if (winnerUuid && winnerUuid === trackedUuid) {
+    return `✅ **${trackedName}** beat **${oppName}** in **${timeText}** (${typeName})${eloText}`;
+  } else if (winnerUuid && winnerUuid !== trackedUuid) {
+    return `❌ **${trackedName}** lost to **${oppName}** in **${timeText}** (${typeName})${eloText}`;
+  }
+
+  // If API didn't provide winnerUuid (rare), fallback to generic
+  return `⚠️ **${trackedName}** finished in **${timeText}** (${typeName})${eloText}`;
+}
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  // Build global UUID map (DO NOT redeclare uuidByName here)
+  // Build global UUID map
   uuidByName = {};
   for (const p of players) {
     const uuid = await fetchUserUUID(p).catch(() => null);
@@ -244,7 +320,7 @@ client.once(Events.ClientReady, async () => {
 
   const channel = await client.channels.fetch(CHANNEL_ID).catch(() => null);
   if (!channel) {
-    console.error("Could not find channel. Check CHANNEL_ID in .env");
+    console.error("Could not find channel. Check CHANNEL_ID in environment variables");
     process.exit(1);
   }
   console.log(`Posting updates in: #${channel.name}`);
@@ -307,7 +383,6 @@ client.once(Events.ClientReady, async () => {
           // Custom placement messages for top 3
           if (place >= 1 && place <= 3) {
             const msg = getPlacementMessage(place, p, typeName);
-            // Only announce if they weren't already in that old top3 slot (prevents spam)
             if (msg && oldTop3[place - 1] !== p) {
               await channel.send(msg);
             }
@@ -319,13 +394,11 @@ client.once(Events.ClientReady, async () => {
         }
       }
 
-      // Update stored top 3 for this type
       state.top3ByType[t] = computeTop3(state, t);
     }
 
     saveState(state);
 
-    // Update the board message
     const msg = await channel.messages.fetch(state.boardMessageId).catch(() => null);
     if (msg) await msg.edit(buildBoardContent(state));
   }, PB_POLL_MS);
@@ -355,19 +428,32 @@ client.once(Events.ClientReady, async () => {
         state.lastMatchId[p] = idStr;
         saveState(state);
 
-        const t = m?.type;
-        const time = Number(m?.result?.time);
-        const forfeited = !!m?.forfeited;
+        const trackedUuid = uuidByName[p] || null;
 
-        if (forfeited || !Number.isFinite(time)) {
-          await channel.send(
-            `✅ **${p}** finished a **${typeLabel(t)}** match — no completion time (DNF/forfeit).`
-          );
-        } else {
-          await channel.send(
-            `✅ **${p}** finished in **${formatTime(time)}** (${typeLabel(t)})`
-          );
+        // If we don't have UUID, fallback to old generic behavior
+        if (!trackedUuid) {
+          const t = m?.type;
+          const time = Number(m?.result?.time);
+          const forfeited = !!m?.forfeited;
+
+          if (forfeited || !Number.isFinite(time)) {
+            await channel.send(
+              `⚠️ **${p}** finished a **${typeLabel(t)}** match — no completion time (DNF/forfeit).`
+            );
+          } else {
+            await channel.send(`⚠️ **${p}** finished in **${formatTime(time)}** (${typeLabel(t)})`);
+          }
+          continue;
         }
+
+        // New: win/loss-aware message with opponent + elo
+        const msg = buildRankedResultMessage({
+          trackedName: p,
+          trackedUuid,
+          match: m,
+        });
+
+        await channel.send(msg);
       }
     }
 
@@ -376,7 +462,7 @@ client.once(Events.ClientReady, async () => {
 });
 
 if (!DISCORD_TOKEN || !CHANNEL_ID) {
-  console.error("Missing DISCORD_TOKEN or CHANNEL_ID in .env");
+  console.error("Missing DISCORD_TOKEN or CHANNEL_ID in environment variables");
   process.exit(1);
 }
 
