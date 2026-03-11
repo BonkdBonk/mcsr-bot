@@ -16,6 +16,7 @@ const players = [
   "superboy80",
   "SDxSHOcK",
   "MyKicksInBay",
+  "MarzBBC",
 ];
 
 // Global map: nickname -> uuid (filled on startup)
